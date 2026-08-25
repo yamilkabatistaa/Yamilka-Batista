@@ -1,0 +1,6 @@
+{
+  "name": "Extractor de Listas de Reproducción de YouTube",
+  "description": "Herramienta rápida y moderna para extraer hasta 100 videos de cualquier lista de reproducción pública de YouTube, mostrando el título y enlace directo, con opciones para copiar y descargar en TXT.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
