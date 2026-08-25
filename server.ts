@@ -1,9 +1,6 @@
 import express from 'express';
 import path from 'path';
-import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
-
-dotenv.config();
 
 const app = express();
 const PORT = 3000;
@@ -15,20 +12,18 @@ function extractPlaylistId(input: string): string | null {
   if (!input || typeof input !== 'string') return null;
   const cleanInput = input.trim();
 
-  // If user provided direct playlist ID (usually starts with PL, RD, UU, FL, LL, OLAK, etc.)
-  if (/^[a-zA-Z0-9_-]{10,60}$/.test(cleanInput) && !cleanInput.includes('http') && !cleanInput.includes('/')) {
+  // If user provided direct playlist ID (starts with PL, RD, UU, FL, LL, OLAK, etc.)
+  if (/^[a-zA-Z0-9_-]{8,64}$/.test(cleanInput) && !cleanInput.includes('http') && !cleanInput.includes('/') && !cleanInput.includes('.')) {
     return cleanInput;
   }
 
   try {
-    // Check if it's a URL
     let urlObj: URL;
     if (cleanInput.startsWith('http://') || cleanInput.startsWith('https://')) {
       urlObj = new URL(cleanInput);
     } else if (cleanInput.includes('youtube.com') || cleanInput.includes('youtu.be')) {
       urlObj = new URL(`https://${cleanInput}`);
     } else {
-      // Try regex search for list parameter
       const listMatch = cleanInput.match(/[?&]list=([a-zA-Z0-9_-]+)/);
       if (listMatch && listMatch[1]) return listMatch[1];
       return null;
@@ -38,8 +33,7 @@ function extractPlaylistId(input: string): string | null {
     if (listParam) {
       return listParam;
     }
-  } catch (err) {
-    // Regex fallback
+  } catch {
     const match = cleanInput.match(/[?&]list=([a-zA-Z0-9_-]+)/);
     if (match && match[1]) return match[1];
   }
@@ -47,92 +41,35 @@ function extractPlaylistId(input: string): string | null {
   return null;
 }
 
-// Fetch playlist via official YouTube Data API v3
-async function fetchViaYouTubeAPI(playlistId: string, apiKey: string) {
-  let videos: Array<{ title: string; url: string; videoId: string }> = [];
-  let playlistTitle = 'Lista de reproducción';
-  let nextPageToken: string | undefined = undefined;
-
-  // First, get playlist title
-  try {
-    const plRes = await fetch(
-      `https://www.googleapis.com/youtube/v3/playlists?part=snippet&id=${playlistId}&key=${apiKey}`
+// Decode HTML entities helper
+function decodeHTMLEntities(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#x2F;/g, '/')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
+    .replace(/\\u[\dA-Fa-f]{4}/g, (match) =>
+      String.fromCharCode(parseInt(match.replace(/\\u/g, ''), 16))
     );
-    if (plRes.ok) {
-      const plData = await plRes.json();
-      if (plData.items && plData.items.length > 0) {
-        playlistTitle = plData.items[0]?.snippet?.title || playlistTitle;
-      }
-    }
-  } catch (e) {
-    console.warn('Could not fetch playlist snippet metadata:', e);
-  }
-
-  // Fetch playlist items (up to 100 max: 2 pages of 50)
-  for (let page = 0; page < 2; page++) {
-    const pageParam = nextPageToken ? `&pageToken=${nextPageToken}` : '';
-    const apiUrl = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId=${playlistId}&key=${apiKey}${pageParam}`;
-
-    const res = await fetch(apiUrl);
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({}));
-      const reason = errorData?.error?.errors?.[0]?.reason || errorData?.error?.message || `HTTP ${res.status}`;
-      
-      if (res.status === 404 || reason.includes('playlistNotFound')) {
-        throw new Error('NOT_FOUND: La lista de reproducción no existe o no se encontró.');
-      } else if (res.status === 403 || reason.includes('quotaExceeded') || reason.includes('forbidden')) {
-        throw new Error(`API_FORBIDDEN: ${reason}`);
-      }
-      throw new Error(`API_ERROR: ${reason}`);
-    }
-
-    const data = await res.json();
-    const items = data.items || [];
-
-    for (const item of items) {
-      const snippet = item.snippet;
-      const videoId = snippet?.resourceId?.videoId;
-      const title = snippet?.title;
-
-      // Skip private or deleted placeholders if empty/inaccessible, or keep exact title
-      if (videoId && title && title !== 'Private video' && title !== 'Deleted video') {
-        videos.push({
-          title: title.trim(),
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          videoId: videoId
-        });
-      } else if (videoId && title) {
-        videos.push({
-          title: title.trim(),
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          videoId: videoId
-        });
-      }
-
-      if (videos.length >= 100) break;
-    }
-
-    nextPageToken = data.nextPageToken;
-    if (!nextPageToken || videos.length >= 100) {
-      break;
-    }
-  }
-
-  return {
-    playlistTitle,
-    videos: videos.slice(0, 100)
-  };
 }
 
-// Scraper fallback when no API key is provided or quota exceeded
-async function fetchViaWebScraper(playlistId: string) {
+// Direct YouTube Playlist extractor without requiring any API Key or Google Cloud credentials
+async function extractPlaylistVideosDirect(playlistId: string) {
   const url = `https://www.youtube.com/playlist?list=${playlistId}&hl=es`;
-  
+
   const headers = {
     'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
   };
 
   const response = await fetch(url, { headers });
@@ -145,16 +82,34 @@ async function fetchViaWebScraper(playlistId: string) {
 
   const html = await response.text();
 
-  // Check common indicators
-  if (html.includes('Esta lista de reproducción es privada') || html.includes('This playlist is private')) {
-    throw new Error('PRIVATE_PLAYLIST: La lista de reproducción es privada. Debe ser pública o no listada para extraer sus videos.');
+  // Validate private or not found states
+  if (
+    html.includes('Esta lista de reproducción es privada') ||
+    html.includes('This playlist is private') ||
+    html.includes('La playlist es privada')
+  ) {
+    throw new Error('PRIVATE_PLAYLIST: La lista de reproducción es privada. Debe ser pública o no listada para que sus videos puedan ser extraídos.');
   }
 
-  if (html.includes('Esta lista de reproducción no existe') || html.includes('The playlist does not exist') || html.includes('Esta página no está disponible')) {
-    throw new Error('NOT_FOUND: La lista de reproducción no existe o fue eliminada.');
+  if (
+    html.includes('Esta lista de reproducción no existe') ||
+    html.includes('The playlist does not exist') ||
+    html.includes('Esta página no está disponible') ||
+    html.includes('Video no disponible')
+  ) {
+    throw new Error('NOT_FOUND: La lista de reproducción no existe o el ID de la playlist es incorrecto.');
   }
 
-  // Extract ytInitialData
+  // Extract playlist title
+  let playlistTitle = 'Lista de reproducción de YouTube';
+  const ogTitleMatch =
+    html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i) ||
+    html.match(/<title>([^<]+)<\/title>/i);
+  if (ogTitleMatch && ogTitleMatch[1]) {
+    playlistTitle = decodeHTMLEntities(ogTitleMatch[1].replace(' - YouTube', '').trim());
+  }
+
+  // Extract JSON payload (ytInitialData)
   let ytInitialData: any = null;
   const scriptRegex = /var\s+ytInitialData\s*=\s*({.+?});<\/script>/s;
   const match = html.match(scriptRegex);
@@ -162,47 +117,47 @@ async function fetchViaWebScraper(playlistId: string) {
   if (match && match[1]) {
     try {
       ytInitialData = JSON.parse(match[1]);
-    } catch (e) {
-      // Try secondary pattern
+    } catch {
       const windowRegex = /window\["ytInitialData"\]\s*=\s*({.+?});<\/script>/s;
       const match2 = html.match(windowRegex);
       if (match2 && match2[1]) {
         try {
           ytInitialData = JSON.parse(match2[1]);
         } catch (err) {
-          console.error('Failed to parse window.ytInitialData', err);
+          console.warn('Failed to parse ytInitialData JSON', err);
         }
       }
     }
   }
 
-  // Also try extracting INNERTUBE API key and continuation token for loading up to 100 videos
+  // Extract INNERTUBE API key and Client Version for continuation (pagination up to 100)
   let apiKeyFromPage: string | null = null;
   const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
   if (apiKeyMatch && apiKeyMatch[1]) {
     apiKeyFromPage = apiKeyMatch[1];
   }
 
-  let playlistTitle = 'Lista de reproducción';
-  const ogTitleMatch = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i) || html.match(/<title>([^<]+)<\/title>/i);
-  if (ogTitleMatch && ogTitleMatch[1]) {
-    playlistTitle = ogTitleMatch[1].replace(' - YouTube', '').trim();
+  let clientVersion = '2.20240301.00.00';
+  const clientVerMatch = html.match(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/);
+  if (clientVerMatch && clientVerMatch[1]) {
+    clientVersion = clientVerMatch[1];
   }
 
   const videos: Array<{ title: string; url: string; videoId: string }> = [];
+  const seenVideoIds = new Set<string>();
   let continuationToken: string | null = null;
 
   if (ytInitialData) {
     try {
-      // Extract title from ytInitialData if available
-      const headerTitle = ytInitialData?.header?.playlistHeaderRenderer?.title?.simpleText ||
+      const headerTitle =
+        ytInitialData?.header?.playlistHeaderRenderer?.title?.simpleText ||
         ytInitialData?.header?.playlistHeaderRenderer?.title?.runs?.[0]?.text ||
         ytInitialData?.metadata?.playlistMetadataRenderer?.title;
       if (headerTitle) {
-        playlistTitle = headerTitle;
+        playlistTitle = decodeHTMLEntities(headerTitle);
       }
 
-      // Find playlist video contents
+      // Traverse tabs and contents
       const tabs = ytInitialData?.contents?.twoColumnBrowseResultsRenderer?.tabs;
       const tabContent = tabs?.[0]?.tabRenderer?.content;
       const sectionList = tabContent?.sectionListRenderer?.contents;
@@ -220,26 +175,28 @@ async function fetchViaWebScraper(playlistId: string) {
             title = v.title.simpleText;
           }
 
-          if (videoId && title) {
+          if (videoId && title && !seenVideoIds.has(videoId)) {
+            seenVideoIds.add(videoId);
             videos.push({
-              title: title.trim(),
+              title: decodeHTMLEntities(title.trim()),
               url: `https://www.youtube.com/watch?v=${videoId}`,
-              videoId: videoId
+              videoId,
             });
           }
         } else if (item.continuationItemRenderer) {
-          continuationToken = item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || null;
+          continuationToken =
+            item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || null;
         }
 
         if (videos.length >= 100) break;
       }
-    } catch (err) {
-      console.warn('Error traversing ytInitialData structure:', err);
+    } catch (e) {
+      console.warn('Error traversing ytInitialData:', e);
     }
   }
 
-  // If we found fewer than 100 videos and have a continuation token + API key from page, fetch continuation!
-  if (videos.length > 0 && videos.length < 100 && continuationToken && apiKeyFromPage) {
+  // Handle continuation if playlist has more items and we need up to 100 videos
+  if (videos.length < 100 && continuationToken && apiKeyFromPage) {
     try {
       const browseUrl = `https://www.youtube.com/youtubei/v1/browse?key=${apiKeyFromPage}&prettyPrint=false`;
       const browseRes = await fetch(browseUrl, {
@@ -248,13 +205,13 @@ async function fetchViaWebScraper(playlistId: string) {
           'Content-Type': 'application/json',
           'User-Agent': headers['User-Agent'],
           'X-YouTube-Client-Name': '1',
-          'X-YouTube-Client-Version': '2.20240301.00.00',
+          'X-YouTube-Client-Version': clientVersion,
         },
         body: JSON.stringify({
           context: {
             client: {
               clientName: 'WEB',
-              clientVersion: '2.20240301.00.00',
+              clientVersion,
               hl: 'es',
               gl: 'ES',
             },
@@ -279,11 +236,12 @@ async function fetchViaWebScraper(playlistId: string) {
                 title = v.title.simpleText;
               }
 
-              if (videoId && title) {
+              if (videoId && title && !seenVideoIds.has(videoId)) {
+                seenVideoIds.add(videoId);
                 videos.push({
-                  title: title.trim(),
+                  title: decodeHTMLEntities(title.trim()),
                   url: `https://www.youtube.com/watch?v=${videoId}`,
-                  videoId: videoId,
+                  videoId,
                 });
               }
 
@@ -293,26 +251,58 @@ async function fetchViaWebScraper(playlistId: string) {
           if (videos.length >= 100) break;
         }
       }
-    } catch (contErr) {
-      console.warn('Continuation fetch encountered non-fatal error:', contErr);
+    } catch (cErr) {
+      console.warn('Continuation pagination error (non-fatal):', cErr);
     }
   }
 
-  // Fallback regex if ytInitialData parsing failed to yield videos
+  // Regex fallback 1: playlistVideoRenderer
   if (videos.length === 0) {
     const videoRegex = /"playlistVideoRenderer":\s*\{"videoId":"([^"]+)".*?"title":\{"runs":\[\{"text":"([^"]+)"\}/g;
     let rMatch;
-    const seenIds = new Set<string>();
-
     while ((rMatch = videoRegex.exec(html)) !== null && videos.length < 100) {
       const vidId = rMatch[1];
       const vidTitle = rMatch[2];
-      if (vidId && vidTitle && !seenIds.has(vidId)) {
-        seenIds.add(vidId);
+      if (vidId && vidTitle && !seenVideoIds.has(vidId)) {
+        seenVideoIds.add(vidId);
         videos.push({
-          title: vidTitle.replace(/\\u[\dA-F]{4}/gi, (match) =>
-            String.fromCharCode(parseInt(match.replace(/\\u/g, ''), 16))
-          ).trim(),
+          title: decodeHTMLEntities(vidTitle.trim()),
+          url: `https://www.youtube.com/watch?v=${vidId}`,
+          videoId: vidId,
+        });
+      }
+    }
+  }
+
+  // Regex fallback 2: simpleText titles
+  if (videos.length === 0) {
+    const compactRegex = /"videoId":"([a-zA-Z0-9_-]{11})".*?"title":\{"simpleText":"([^"]+)"\}/g;
+    let cMatch;
+    while ((cMatch = compactRegex.exec(html)) !== null && videos.length < 100) {
+      const vidId = cMatch[1];
+      const vidTitle = cMatch[2];
+      if (vidId && vidTitle && !seenVideoIds.has(vidId)) {
+        seenVideoIds.add(vidId);
+        videos.push({
+          title: decodeHTMLEntities(vidTitle.trim()),
+          url: `https://www.youtube.com/watch?v=${vidId}`,
+          videoId: vidId,
+        });
+      }
+    }
+  }
+
+  // Regex fallback 3: compact playlist panel items
+  if (videos.length === 0) {
+    const panelRegex = /"playlistPanelVideoRenderer":\s*\{"title":\{"simpleText":"([^"]+)"\}.*?"videoId":"([^"]+)"/g;
+    let pMatch;
+    while ((pMatch = panelRegex.exec(html)) !== null && videos.length < 100) {
+      const vidTitle = pMatch[1];
+      const vidId = pMatch[2];
+      if (vidId && vidTitle && !seenVideoIds.has(vidId)) {
+        seenVideoIds.add(vidId);
+        videos.push({
+          title: decodeHTMLEntities(vidTitle.trim()),
           url: `https://www.youtube.com/watch?v=${vidId}`,
           videoId: vidId,
         });
@@ -330,15 +320,15 @@ async function fetchViaWebScraper(playlistId: string) {
   };
 }
 
-// API Route for extracting YouTube playlist videos
+// API Route: Extract playlist directly from URL (No API key needed)
 app.post('/api/extract-playlist', async (req, res) => {
   try {
-    const { url, apiKey: userApiKey } = req.body;
+    const { url } = req.body;
 
     if (!url || typeof url !== 'string' || !url.trim()) {
       return res.status(400).json({
         success: false,
-        error: 'Por favor, ingresa una URL válida de una lista de reproducción de YouTube.',
+        error: 'Por favor, introduce el enlace de una lista de reproducción de YouTube.',
         code: 'INVALID_URL',
       });
     }
@@ -347,36 +337,14 @@ app.post('/api/extract-playlist', async (req, res) => {
     if (!playlistId) {
       return res.status(400).json({
         success: false,
-        error: 'No se pudo identificar un ID de lista de reproducción válido en el enlace proporcionado. Asegúrate de que contenga "list=..." o sea una URL de playlist de YouTube.',
+        error: 'No se pudo identificar una lista de reproducción válida en el enlace. Asegúrate de incluir el enlace con "list=..." (ej: https://www.youtube.com/playlist?list=PLbQgrsYtJs8k...).',
         code: 'INVALID_URL',
       });
     }
 
-    // Determine if we should use Google YouTube API Key
-    const apiKey = (userApiKey && typeof userApiKey === 'string' && userApiKey.trim()) ||
-                   process.env.YOUTUBE_API_KEY ||
-                   process.env.GOOGLE_API_KEY ||
-                   '';
+    const result = await extractPlaylistVideosDirect(playlistId);
 
-    let result: { playlistTitle: string; videos: Array<{ title: string; url: string; videoId: string }> };
-    let source: 'api' | 'scraper' = 'scraper';
-
-    if (apiKey && apiKey.trim().length > 10) {
-      try {
-        result = await fetchViaYouTubeAPI(playlistId, apiKey.trim());
-        source = 'api';
-      } catch (apiErr: any) {
-        console.warn('YouTube API failed, falling back to server scraper:', apiErr?.message);
-        // Fallback to web scraper
-        result = await fetchViaWebScraper(playlistId);
-        source = 'scraper';
-      }
-    } else {
-      result = await fetchViaWebScraper(playlistId);
-      source = 'scraper';
-    }
-
-    // Number results 1 to N
+    // Number videos strictly 1 to N (max 100)
     const indexedVideos = result.videos.map((v, i) => ({
       index: i + 1,
       title: v.title,
@@ -392,12 +360,12 @@ app.post('/api/extract-playlist', async (req, res) => {
         extractedCount: indexedVideos.length,
       },
       videos: indexedVideos,
-      source,
+      source: 'direct',
     });
   } catch (error: any) {
     console.error('Playlist extraction error:', error);
-    const msg = error?.message || 'Error desconocido al procesar la lista de reproducción.';
-    
+    const msg = error?.message || 'Error al procesar la lista de reproducción.';
+
     let code: 'NOT_FOUND' | 'PRIVATE_PLAYLIST' | 'EMPTY_PLAYLIST' | 'NETWORK_ERROR' | 'UNKNOWN' = 'UNKNOWN';
     let userMessage = msg;
 
@@ -444,7 +412,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Extractor de Listas de YouTube corriendo en http://localhost:${PORT}`);
+    console.log(`Servidor activo en http://localhost:${PORT}`);
   });
 }
 
